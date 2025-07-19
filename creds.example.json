@@ -1,0 +1,6 @@
+{
+    "username": "dev@example.com",
+    "password": "************",
+    "token": "*************************",
+    "loginUrl": "https://test.salesforce.com/services/Soap/u/63.0"
+}

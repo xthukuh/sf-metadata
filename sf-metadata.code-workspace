@@ -1,0 +1,23 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "workbench.colorCustomizations": {
+            // "activityBar.background": "#460275",
+            "titleBar.activeBackground": "#6303A4",
+            "titleBar.activeForeground": "#FCF9FF",
+            "titleBar.inactiveBackground": "#460275",
+            "titleBar.inactiveForeground": "#FCF9FF",
+        },
+        "editor.detectIndentation": false,
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4,
+        "cSpell.words": [
+            "lstats",
+            "soapenv"
+        ],
+    }
+}
