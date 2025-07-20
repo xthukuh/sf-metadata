@@ -9,7 +9,7 @@ const DUMP_DIR = Path.join(__dirname, '.dump.xx');
 const CREDS_FILE = Path.join(__dirname, 'creds.json');
 const SESSION_FILE = Path.join(DUMP_DIR, 'session.json');
 const METADATA_FILE = Path.join(DUMP_DIR, 'metadata.json');
-const COMPONENTS_FILE = Path.join(DUMP_DIR, 'components.json');
+const RECORDS_FILE = Path.join(DUMP_DIR, 'records.json');
 
 // Cache
 const Cache = {
@@ -17,6 +17,15 @@ const Cache = {
     apiVersion: undefined,
     session: undefined,
 };
+
+// Generate UUID
+function uuid() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
 
 // sleep milliseconds promise
 function sleep(ms) {
@@ -202,7 +211,8 @@ async function login() {
     // result
     return {
         sessionId: res.sessionId[0],
-        metadataUrl: res.metadataServerUrl[0]
+        serverUrl: res.serverUrl[0],
+        metadataUrl: res.metadataServerUrl[0],
     };
 }
 
@@ -246,7 +256,7 @@ async function describeMetadata() {
 }
 
 // list metadata
-async function listMetadata(typeName) {
+async function listMetadata(type, folder = undefined, tag = undefined) {
     const { sessionId, metadataUrl } = Cache.session, apiVersion = Cache.apiVersion;
     const body = `
         <env:Envelope xmlns:xsd="http://www.w3.org/2001/XMLSchema"
@@ -260,7 +270,8 @@ async function listMetadata(typeName) {
             <env:Body>
                 <n2:listMetadata xmlns:n2="http://soap.sforce.com/2006/04/metadata">
                     <n2:queries>
-                        <n2:type>${typeName}</n2:type>
+                        <n2:type>${type}</n2:type>
+                        ${folder ? `<n2:folder>${folder}</n2:folder>` : ''}
                     </n2:queries>
                     <n2:asOfVersion>${apiVersion}</n2:asOfVersion>
                 </n2:listMetadata>
@@ -274,14 +285,97 @@ async function listMetadata(typeName) {
     };
 
     // list type metadata
-    console.debug(`[*] List ${typeName} Metadata...`);
+    console.debug(`[*]${tag ? ` ${tag}` : ''} List ${type}${folder ? ` (folder: ${folder})` : ''} Metadata...`);
     const xml = await soapRequest(metadataUrl, headers, body);
     const res = await parseStringPromise(xml);
-    const results = res?.['soapenv:Envelope']?.['soapenv:Body']?.[0]?.['listMetadataResponse']?.[0]?.['result'] || [];
-    console.debug(`[*] List ${typeName} Metadata Results: ${results.length}`);
+    const items = res?.['soapenv:Envelope']?.['soapenv:Body']?.[0]?.['listMetadataResponse']?.[0]?.['result'] || [];
+    const results = [];
+    for (const item of items) {
+        results.push({
+            id: item.id[0] || null,
+            type: item.type[0] || null,
+            fullName: item.fullName[0] || null,
+            fileName: item.fileName[0] || null,
+            createdById: item.createdById[0] || null,
+            createdByName: item.createdByName[0] || null,
+            createdDate: item.createdDate[0] || null,
+            lastModifiedById: item.lastModifiedById[0] || null,
+            lastModifiedByName: item.lastModifiedByName[0] || null,
+            lastModifiedDate: item.lastModifiedDate[0] || null,
+            namespacePrefix: item.hasOwnProperty('namespacePrefix') ? item.namespacePrefix[0] : null,
+            manageableState: item.hasOwnProperty('manageableState') ? item.manageableState[0] : null,
+        });
+    }
+    console.debug(`[*]${tag ? ` ${tag}` : ''} List ${type}${folder ? ` (folder: ${folder})` : ''} Metadata Results: ${results.length}`);
     
-    // result
+    // results
     return results;
+}
+
+// SOQL Query
+async function query(soql, tooling = false) {
+    const { sessionId, serverUrl } = Cache.session;
+    const body = tooling
+    ? `
+        <env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/"
+                      xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <env:Header>
+                <n1:SessionHeader xmlns:n1="urn:tooling.soap.sforce.com">
+                    <n1:sessionId>${sessionId}</n1:sessionId>
+                </n1:SessionHeader>
+            </env:Header>
+            <env:Body>
+                <n2:query xmlns:n2="urn:tooling.soap.sforce.com">
+                    <n2:queryString>${soql}</n2:queryString>
+                </n2:query>
+            </env:Body>
+        </env:Envelope>
+    `
+    : `
+        <env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/"
+              xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <env:Header>
+                <n1:SessionHeader xmlns:n1="urn:partner.soap.sforce.com">
+                <n1:sessionId>${sessionId}</n1:sessionId>
+                </n1:SessionHeader>
+            </env:Header>
+            <env:Body>
+                <n2:query xmlns:n2="urn:partner.soap.sforce.com">
+                <n2:queryString>${soql}</n2:queryString>
+                </n2:query>
+            </env:Body>
+        </env:Envelope>
+    `;
+    const headers = {
+        'Content-Type': 'text/xml',
+        'SOAPAction': 'query',
+        'Content-Length': Buffer.byteLength(body)
+    };
+
+    // query soql
+    const url = tooling ? serverUrl.match(/(.*\/Soap\/u\/[^\/]+)/)[0].replace(/Soap\/u/, 'Soap/T') : serverUrl;
+    console.debug('[*] Query SOQL...', { sessionId, url, soql });
+    const response = await soapRequest(url, headers, body);
+    const parsed = await parseStringPromise(response);
+    const items = parsed['soapenv:Envelope']['soapenv:Body'][0]['queryResponse'][0]['result'][0]['records'];
+    const records = [];
+    for (const item of items) {
+        const record = {};
+        for (const key in item) {
+            if (!item.hasOwnProperty(key)) continue;
+            if (key === '$') continue;
+            if (key === 'sf:type') continue;
+            const k = key.replace(/^sf:/, '');
+            if (k === 'Id' && 'object' === typeof item[key][0]) continue;
+            record[k] = item[key][0];
+        }
+        records.push(record);
+    }
+
+    // result
+    return records;
 }
 
 // Main
@@ -294,81 +388,240 @@ async function listMetadata(typeName) {
         Cache.apiVersion = creds.loginUrl.split('/').pop();
         Cache.session = await login();
 
+        // FIXME: test query
+        /*
+        const soql = 'SELECT MetadataComponentId, MetadataComponentNamespace, MetadataComponentName, MetadataComponentType, RefMetadataComponentId, RefMetadataComponentNamespace, RefMetadataComponentName, RefMetadataComponentType FROM MetadataComponentDependency';
+        const res = await query(soql, true);
+        console.log('[+] query result: ', JSON.stringify(res, undefined, 4));
+        return;
+        */
+
         // describe metadata (all)
         const metadata = await describeMetadata();
 
-        // components list metadata
-        console.debug('[~] parse metadata objects...');
-        const components = {};
-        const cachedMetadata = {};
-        const inFolderSet = new Set();
-        const metaFileSet = new Set();
-        const childTypeSet = new Set();
-        const _add_components = async (type, key, isChild, isFolder) => {
-            if (!components.hasOwnProperty(key)) components[key] = {};
-            components[key][type] = {key, type, isChild, isFolder, count: 0, metadata: undefined};
-            let res = undefined;
-            const tag = key !== type ? `${key} => ${type}` : key;
-            console.debug(`[*] Add ${tag} Components...`);
-            if (!cachedMetadata.hasOwnProperty(type)) {
-                await sleep(500); // delay
-                res = await listMetadata(type).catch(err => {
-                    console.error(`[!] list metadata (${tag}) failure:`, err);
-                    return undefined;
-                });
-                if (Object(res) === res) cachedMetadata[type] = res;
-            }
-            else {
-                res = cachedMetadata[type];
-                console.debug(`[+] cached metadata (${tag}): `, JSON.stringify(res, undefined, 4));
-            }
-            const count = res?.length ?? 0;
-            components[key][type].metadata = res;
-            components[key][type].count = count;
+        // records - parse metadata
+        const records = {
+            package: {
+                id: 1,
+                random_id: uuid(),
+                created_date: new Date().toISOString(),
+                finished_date: null,
+                username: creds.username,
+                api_version: Cache.apiVersion,
+                access_token: Cache.session.sessionId,
+                instance_url: Cache.session.metadataUrl.match(/https:\/\/[^\/]+?(?=\/)/)[0],
+                component_option: 'all', // all|wildcard_only|none|unmanaged (component.manageableState == 'unmanaged')
+                package: null,
+                status: null, // Not Started|Running|Finished|Error
+                error: null,
+            },
+            componentTypes: {
+                '__example_component_type': {
+                    package: 1,
+                    parent: null,
+                    name: '__example_component_type',
+                    suffix: null,
+                    directory_name: null,
+                    in_folder: false,
+                    meta_file: false,
+                    children: null,
+                },
+            },
+            components: {
+                '__example_component': {
+                    key: null,
+                    component_type: '__example_component_type',
+                    name: '__example_component',
+                    id: null,
+                    type: null,
+                    file_name: null,
+                    created_by_id: null,
+                    created_by_name: null,
+                    created_date: null,
+                    last_modified_by_id: null,
+                    last_modified_by_name: null,
+                    last_modified_date: null,
+                    namespace_prefix: null,
+                    manageable_state: null,
+                },
+            },
         };
-        for (const obj of (metadata.metadataObjects || [])) {
-            const parent = obj.xmlName[0].trim();
-            const isInFolder = obj.inFolder?.[0] === 'true';
-            if (isInFolder) inFolderSet.add(parent);
-            if (obj.metaFile?.[0] === 'true') metaFileSet.add(parent);
-            
-            // children list
-            const objChildXmlNames = (obj.childXmlNames ?? []).map(v => 'string' === typeof v ? v.trim() : '').filter(v => v);
-            if (objChildXmlNames.length) {
-                for (let i = 0; i < objChildXmlNames.length; i ++) {
-                    
-                    // child type name
-                    const name = objChildXmlNames[i] === 'ManagedTopic'
-                    ? 'ManagedTopics' // ManagedTopic is not a valid component Type and it should be 'ManagedTopics'
-                    : objChildXmlNames[i];
-                    childTypeSet.add(name);
-                    
-                    // add components
-                    await _add_components(name, parent, true, false);
+        const _includeComponent = (component) => {
+            const opt = records.package.component_option;
+            if (opt === 'all') return true;
+            if (opt === 'none') return component.namespacePrefix === null;
+            if (opt === 'unmanaged') return [null, 'unmanaged'].includes(component.manageableState);
+            return true;
+        };
+        const isWildcard = records.package.component_option === 'wildcard_only';
+        const metadataObjects = (metadata.metadataObjects || []);
+        const mLen = metadataObjects.length;
+        for (let n = 0; n < mLen; n ++) {
+            const obj = metadataObjects[n];
+            const objTag = `(${n + 1}/${mLen})`;
+            const metaObject = {
+                directoryName: obj.directoryName[0],
+                inFolder: obj.inFolder[0] === 'true',
+                metaFile: obj.metaFile[0] === 'true',
+                suffix: obj.suffix?.[0] ?? null,
+                xmlName: obj.xmlName[0],
+                childXmlNames: obj.childXmlNames ?? [],
+            };
+            if (metaObject.childXmlNames.length) {
+                for (const childXmlName of metaObject.childXmlNames) {
+                    records.componentTypes[childXmlName] = {
+                        package: records.package.id,
+                        parent: metaObject.xmlName,
+                        name: childXmlName,
+                        suffix: null,
+                        directory_name: null,
+                        in_folder: false,
+                        meta_file: false,
+                        children: null,
+                    };
                 }
             }
-            
-            // parent type name
-            let name = parent;
-            if (isInFolder) {
-                if (name === 'EmailTemplate') name = 'EmailFolder'; // EmailTemplate = EmailFolder (for some reason)
-                else name = name + 'Folder';
+            records.componentTypes[metaObject.xmlName] = {
+                package: records.package.id,
+                parent: null,
+                name: metaObject.xmlName,
+                suffix: metaObject.suffix,
+                directory_name: metaObject.directoryName,
+                in_folder: metaObject.inFolder,
+                meta_file: metaObject.metaFile,
+                children: metaObject.childXmlNames.join(', ') || null,
+            };
+            let isComponent = false;
+            if (!metaObject.inFolder && !isWildcard) {
+                if (metaObject.childXmlNames.length) {
+                    for (let i = 0; i < metaObject.childXmlNames.length; i ++) {
+                        let type = metaObject.childXmlNames[i];
+                        if (type === 'ManagedTopic') type = 'ManagedTopics'; // ManagedTopic is not a valid component Type and it should be 'ManagedTopics'
+                        const tag = `${(i + 1)}/${metaObject.childXmlNames.length}`;
+                        const results = await listMetadata(type, undefined, tag).catch(err => {
+                            console.error(`[!] ${tag} list metadata (${metaObject.xmlName} => ${type}) failure:`, err);
+                            return [];
+                        });
+                        for (const res of results) {
+                            if (!records.componentTypes.hasOwnProperty(res.type)) {
+                                console.log(`[i] The "${res.type}" component type does not exist for "${res.fullName}".`);
+                                continue;
+                            }
+                            if (!_includeComponent(res)) continue;
+                            const key = `${res.type}.${res.fullName}`;
+                            records.components[key] = {
+                                key,
+                                component_type: res.type,
+                                name: res.fullName,
+                                id: res.id,
+                                type: res.type,
+                                file_name: res.fileName,
+                                created_by_id: res.createdById,
+                                created_by_name: res.createdByName,
+                                created_date: res.createdDate,
+                                last_modified_by_id: res.lastModifiedById,
+                                last_modified_by_name: res.lastModifiedByName,
+                                last_modified_date: res.lastModifiedDate,
+                                namespace_prefix: res.namespacePrefix,
+                                manageable_state: res.manageableState,
+                            };
+                        }
+                    }
+                }
+                isComponent = true;
             }
-
-            // add components
-            await _add_components(name, parent, false, isInFolder);
+            else if (metaObject.inFolder) {
+                let type = metaObject.xmlName;
+                if (type === 'EmailTemplate') type = 'EmailFolder'; // EmailTemplate = EmailFolder (for some reason)
+                else type = type + 'Folder'; // Append "Folder" keyword onto end of component type
+                const folderResults = await listMetadata(type, undefined, objTag).catch(err => {
+                    console.error(`[!] ${objTag} list metadata (${metaObject.xmlName} => ${type}) failure:`, err);
+                    return [];
+                });
+                for (let i = 0; i < folderResults.length; i ++) {
+                    const tag = `${objTag} folder ${i + 1}/${folderResults.length}`;
+                    const folderRes = folderResults[i];
+                    if (_includeComponent(folderRes)) {
+                        const key = `${metaObject.xmlName}.${folderRes.fullName}`;
+                        records.components[key] = {
+                            key,
+                            component_type: metaObject.xmlName,
+                            name: folderRes.fullName,
+                            id: folderRes.id,
+                            type: folderRes.type,
+                            file_name: folderRes.fileName,
+                            created_by_id: folderRes.createdById,
+                            created_by_name: folderRes.createdByName,
+                            created_date: folderRes.createdDate,
+                            last_modified_by_id: folderRes.lastModifiedById,
+                            last_modified_by_name: folderRes.lastModifiedByName,
+                            last_modified_date: folderRes.lastModifiedDate,
+                            namespace_prefix: folderRes.namespacePrefix,
+                            manageable_state: folderRes.manageableState,
+                        };
+                    }
+                    const results = await listMetadata(metaObject.xmlName, folderRes.fullName, tag).catch(err => {
+                        console.error(`[!] ${tag} list metadata (${metaObject.xmlName} => ${type} => ${folderRes.fullName}) failure:`, err);
+                        return [];
+                    });
+                    for (const res of results) {
+                        if (!_includeComponent(res)) continue;
+                        const key = `${metaObject.xmlName}.${folderRes.fullName}.${res.fullName}`;
+                        records.components[key] = {
+                            key,
+                            component_type: metaObject.xmlName,
+                            name: res.fullName,
+                            id: res.id,
+                            type: res.type,
+                            file_name: res.fileName,
+                            created_by_id: res.createdById,
+                            created_by_name: res.createdByName,
+                            created_date: res.createdDate,
+                            last_modified_by_id: res.lastModifiedById,
+                            last_modified_by_name: res.lastModifiedByName,
+                            last_modified_date: res.lastModifiedDate,
+                            namespace_prefix: res.namespacePrefix,
+                            manageable_state: res.manageableState,
+                        };
+                    }
+                }
+            }
+            if (isComponent) {
+                const tag = `${objTag} Component`;
+                const results = await listMetadata(metaObject.xmlName, undefined, tag).catch(err => {
+                    console.error(`[!] ${tag} list metadata (${metaObject.xmlName}) failure:`, err);
+                    return [];
+                });
+                for (const res of results) {
+                    if (!records.componentTypes.hasOwnProperty(res.type)) {
+                        console.log(`[i] The "${res.type}" component type does not exist for "${res.fullName}".`);
+                        continue;
+                    }
+                    if (!_includeComponent(res)) continue;
+                    const key = `${res.type}.${res.fullName}`;
+                    records.components[key] = {
+                        key,
+                        component_type: res.type,
+                        name: res.fullName,
+                        id: res.id,
+                        type: res.type,
+                        file_name: res.fileName,
+                        created_by_id: res.createdById,
+                        created_by_name: res.createdByName,
+                        created_date: res.createdDate,
+                        last_modified_by_id: res.lastModifiedById,
+                        last_modified_by_name: res.lastModifiedByName,
+                        last_modified_date: res.lastModifiedDate,
+                        namespace_prefix: res.namespacePrefix,
+                        manageable_state: res.manageableState,
+                    };
+                }
+            }
         }
 
-        // components - save output
-        writeSync(COMPONENTS_FILE, JSON.stringify(components, undefined, 4));
-        console.log('[+] Components Saved:', COMPONENTS_FILE.substring(__dirname.length + 1));
-
-        // extra info
-        console.debug('[+] extra: ', JSON.stringify({
-            inFolderSet: [...inFolderSet],
-            metaFileSet: [...metaFileSet],
-            childTypeSet: [...childTypeSet],
-        }, undefined, 4));
+        // records - save output
+        writeSync(RECORDS_FILE, JSON.stringify(records, undefined, 4));
+        console.log('[+] Records Saved:', RECORDS_FILE.substring(__dirname.length + 1));
 
         // done
         console.log('[+] done.');
