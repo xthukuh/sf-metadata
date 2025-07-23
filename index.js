@@ -499,6 +499,224 @@ function buildDependencyTree(dependencies) {
     return [...roots].map(id => nodes.get(id))
 }
 
+// dependency lines
+function printDependencyLines(dependencies) {
+    const graph = new Map()
+    const inDegree = new Map()
+    const componentMap = new Map()
+
+    for (const dep of dependencies) {
+        const parentId = dep.RefMetadataComponentId
+        const childId = dep.MetadataComponentId
+
+        // Store component metadata
+        componentMap.set(parentId, {
+            type: dep.RefMetadataComponentType,
+            id: parentId,
+            name: dep.RefMetadataComponentName
+        })
+        componentMap.set(childId, {
+            type: dep.MetadataComponentType,
+            id: childId,
+            name: dep.MetadataComponentName
+        })
+
+        // Build graph
+        if (!graph.has(parentId)) graph.set(parentId, new Set())
+        graph.get(parentId).add(childId)
+
+        inDegree.set(childId, (inDegree.get(childId) || 0) + 1)
+        if (!inDegree.has(parentId)) inDegree.set(parentId, 0)
+    }
+
+    // Kahn's algorithm for topological sort
+    const queue = [...inDegree.entries()]
+        .filter(([_, deg]) => deg === 0)
+        .map(([id]) => id)
+
+    const visited = new Set()
+    const output = []
+
+    while (queue.length > 0) {
+        const id = queue.shift()
+        if (visited.has(id)) continue
+        visited.add(id)
+
+        const comp = componentMap.get(id)
+        output.push(`[${comp.type}] ${comp.name} (${comp.id})`)
+
+        if (graph.has(id)) {
+            for (const childId of graph.get(id)) {
+                inDegree.set(childId, inDegree.get(childId) - 1)
+                if (inDegree.get(childId) === 0) {
+                    queue.push(childId)
+                }
+            }
+        }
+    }
+
+    return output
+}
+
+function groupComponentsByDeploymentStage(dependencies) {
+    const graph = new Map()
+    const inDegree = new Map()
+    const componentMap = new Map()
+
+    for (const dep of dependencies) {
+        const parentId = dep.RefMetadataComponentId
+        const childId = dep.MetadataComponentId
+
+        // Register metadata
+        componentMap.set(parentId, {
+            id: parentId,
+            name: dep.RefMetadataComponentName,
+            type: dep.RefMetadataComponentType
+        })
+
+        componentMap.set(childId, {
+            id: childId,
+            name: dep.MetadataComponentName,
+            type: dep.MetadataComponentType
+        })
+
+        // Build graph
+        if (!graph.has(parentId)) graph.set(parentId, new Set())
+        graph.get(parentId).add(childId)
+
+        inDegree.set(childId, (inDegree.get(childId) || 0) + 1)
+        if (!inDegree.has(parentId)) inDegree.set(parentId, 0)
+    }
+
+    const queue = [...inDegree.entries()]
+        .filter(([_, deg]) => deg === 0)
+        .map(([id]) => id)
+
+    const visited = new Set()
+    const result = []
+    let stageIndex = 1
+
+    while (queue.length > 0) {
+        const nextQueue = []
+        const stageTypes = new Set()
+        const stageComponents = []
+
+        for (const id of queue) {
+            if (visited.has(id)) continue
+            visited.add(id)
+
+            const comp = componentMap.get(id)
+            if (!stageTypes.has(comp.type)) {
+                stageTypes.add(comp.type)
+                stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`)
+            }
+
+            if (graph.has(id)) {
+                for (const childId of graph.get(id)) {
+                    inDegree.set(childId, inDegree.get(childId) - 1)
+                    if (inDegree.get(childId) === 0) {
+                        nextQueue.push(childId)
+                    }
+                }
+            }
+        }
+
+        if (stageComponents.length > 0) {
+            result.push(...stageComponents)
+            stageIndex++
+        }
+
+        queue.length = 0
+        queue.push(...nextQueue)
+    }
+
+    return result
+}
+
+function groupComponentsByDeploymentStage2(dependencies) {
+    const graph = new Map()
+    const inDegree = new Map()
+    const componentMap = new Map()
+
+    for (const dep of dependencies) {
+        const parentId = dep.RefMetadataComponentId
+        const childId = dep.MetadataComponentId
+
+        componentMap.set(parentId, {
+            id: parentId,
+            name: dep.RefMetadataComponentName,
+            type: dep.RefMetadataComponentType
+        })
+
+        componentMap.set(childId, {
+            id: childId,
+            name: dep.MetadataComponentName,
+            type: dep.MetadataComponentType
+        })
+
+        if (!graph.has(parentId)) graph.set(parentId, new Set())
+        graph.get(parentId).add(childId)
+
+        inDegree.set(childId, (inDegree.get(childId) || 0) + 1)
+        if (!inDegree.has(parentId)) inDegree.set(parentId, 0)
+    }
+
+    const queue = [...inDegree.entries()]
+        .filter(([_, deg]) => deg === 0)
+        .map(([id]) => id)
+
+    const visited = new Set()
+    const result = []
+    let stageIndex = 1
+
+    while (queue.length > 0) {
+        const nextQueue = []
+        const stageComponents = []
+
+        for (const id of queue) {
+            if (visited.has(id)) continue
+            visited.add(id)
+
+            const comp = componentMap.get(id)
+            stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`)
+
+            if (graph.has(id)) {
+                for (const childId of graph.get(id)) {
+                    inDegree.set(childId, inDegree.get(childId) - 1)
+                    if (inDegree.get(childId) === 0) {
+                        nextQueue.push(childId);
+                    }
+                }
+            }
+        }
+
+        if (stageComponents.length > 0) {
+            result.push(...stageComponents)
+            stageIndex++
+        }
+
+        queue.length = 0
+        queue.push(...nextQueue)
+    }
+    // stageIndex ++;
+    const stageComponents = [];
+    [...inDegree.entries()].forEach(([k,v]) => {
+        if (v > 0) {
+            inDegree.set(k, 0)
+            const comp = componentMap.get(k)
+            stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`)
+        }
+    });
+    result.push(...stageComponents)
+
+    console.debug('inDegree > 0:', [...inDegree.entries()].filter(v => !visited.has(v[0]) && v[1] > 0));
+    // console.debug('graph:', [...graph.entries()]);
+
+    return result
+}
+
+
+
 // Main
 (async () => {
     try {
@@ -506,11 +724,21 @@ function buildDependencyTree(dependencies) {
         // command actions
         const args = process.argv.slice(2);
         const action = args[0];
+        const value = args[1];
         if (action === 'deps') {
             console.debug('[~] parse dependencies...');
             const records = readSync(DEPENDENCIES_FILE, 'json', undefined, 'utf8');
-            const tree = buildDependencyTree(records);
-            console.debug('[+] tree:', jsonStringify(tree, 4));
+            if (value === 'tree') { // node index.js deps tree
+                const tree = buildDependencyTree(records);
+                console.debug('[+] tree:', jsonStringify(tree, 4));
+            } else if (value === 'lines') { // node index.js deps lines
+                const lines = printDependencyLines(records);
+                console.debug('\n[~] lines:\n' + lines.map((v, i) =>`#${i + 1} ${v}`).join('\n'));
+            } else if (value === 'stages' || !value) { // node index.js deps stages
+                const lines = groupComponentsByDeploymentStage2(records);
+                console.debug('\n[~] stages:\n' + lines.map((v, i) =>`#${i + 1} ${v}`).join('\n'));
+            }
+            console.debug('[+] done.');
             return;
         }
 
