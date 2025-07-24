@@ -3,6 +3,7 @@ const fs = require('fs');
 const Path = require('path');
 const https = require('https');
 const { parseStringPromise } = require('xml2js');
+const { _uuid, Term, _jsonStringify } = require('xtutils');
 
 // Files
 const DUMP_DIR = Path.join(__dirname, '.dump.xx');
@@ -11,6 +12,7 @@ const SESSION_FILE = Path.join(DUMP_DIR, 'session.json');
 const METADATA_FILE = Path.join(DUMP_DIR, 'metadata.json');
 const RECORDS_FILE = Path.join(DUMP_DIR, 'records.json');
 const DEPENDENCIES_FILE = Path.join(DUMP_DIR, 'dependencies.json');
+const DEPLOYMENTS_FILE = Path.join(DUMP_DIR, 'deployments.json');
 
 // Cache
 const Cache = {
@@ -18,15 +20,6 @@ const Cache = {
     apiVersion: undefined,
     session: undefined,
 };
-
-// Generate UUID
-function uuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-}
 
 // print
 let print_last_len = 0;
@@ -39,11 +32,6 @@ function printLn(text, offset = 0) {
     }
     process.stdout.write(text + '\n');
     print_last_len = len + 1;
-}
-
-// sleep milliseconds promise
-function sleep(ms) {
-    return new Promise((resolve) => void setTimeout(() => resolve(ms), ms));
 }
 
 // Path info
@@ -397,325 +385,143 @@ async function query(soql, tooling = false, tag = undefined, file = undefined) {
     return records;
 }
 
-// JSON stringify
-function jsonStringify(value, space = undefined, _undefined = null) {
-	const _space = space === null ? undefined : space;
-	const parents = [];
-	const path = ['this'];
-	const refs = new Map();
-	const _clear = () => {
-		refs.clear();
-		parents.length = 0;
-		path.length = 1;
-	};
-	const _parents = (key, value) => {
-		let i = parents.length - 1, prev = parents[i];
-		if (prev[key] === value || i === 0){
-			path.push(key);
-			parents.push(value);
-			return;
-		}
-		while (i-- >= 0) {
-			prev = parents[i];
-			if (prev?.[key] === value){
-				i += 2;
-				parents.length = i;
-				path.length = i;
-				--i;
-				parents[i] = value;
-				path[i] = key;
-				break;
-			}
-		}
-	};
-	const _replacer = function(key, value) {
-		if (value === null) return value;
-		if (value instanceof Error){
-			try {
-				value = String(value);
-			}
-			catch (e){
-				const error = '[FAILURE] Parse Error to String failed!';
-				console.warn(error, {value, e});
-				value = error;
-			}
-		}
-		if (value instanceof Set) value = [...value];
-		if (value instanceof Map) value = [...value];
-		if (value instanceof RegExp) value = value + '';
-		if ('object' === typeof value){
-			if (key) _parents(key, value);
-			const other = refs.get(value);
-			if (other) return '[Circular Reference]' + other;
-			else refs.set(value, path.join('.'));
-		}
-		return value;
-	};
-	try {
-		if (value === undefined) value = _undefined !== undefined ? _undefined : _undefined = null;
-		parents.push(value);
-		return JSON.stringify(value, _replacer, _space);
-	}
-	finally {
-		_clear();
-	}
-}
-
-// build dependency tree
-function buildDependencyTree(dependencies) {
-    const nodes = new Map()
-    const roots = new Set()
-
-    // Initialize nodes and map by component ID
-    for (const dep of dependencies) {
-        const childId = dep.MetadataComponentId
-        const parentId = dep.RefMetadataComponentId
-
-        if (!nodes.has(childId)) {
-            nodes.set(childId, {
-                id: childId,
-                name: dep.MetadataComponentName,
-                type: dep.MetadataComponentType,
-                children: []
-            })
-        }
-
-        if (!nodes.has(parentId)) {
-            nodes.set(parentId, {
-                id: parentId,
-                name: dep.RefMetadataComponentName,
-                type: dep.RefMetadataComponentType,
-                children: []
-            })
-        }
-
-        // Add child to parent's children
-        nodes.get(parentId).children.push(nodes.get(childId))
-
-        // Track potential roots
-        roots.add(parentId)
-        roots.delete(childId)
-    }
-    return [...roots].map(id => nodes.get(id))
-}
-
-// dependency lines
-function printDependencyLines(dependencies) {
-    const graph = new Map()
-    const inDegree = new Map()
-    const componentMap = new Map()
+// deployment stages
+function deploymentStages2(dependencies) {
+    const graph = new Map();
+    const inDegree = new Map();
+    const componentMap = new Map();
 
     for (const dep of dependencies) {
-        const parentId = dep.RefMetadataComponentId
-        const childId = dep.MetadataComponentId
-
-        // Store component metadata
-        componentMap.set(parentId, {
-            type: dep.RefMetadataComponentType,
-            id: parentId,
-            name: dep.RefMetadataComponentName
-        })
-        componentMap.set(childId, {
-            type: dep.MetadataComponentType,
-            id: childId,
-            name: dep.MetadataComponentName
-        })
-
-        // Build graph
-        if (!graph.has(parentId)) graph.set(parentId, new Set())
-        graph.get(parentId).add(childId)
-
-        inDegree.set(childId, (inDegree.get(childId) || 0) + 1)
-        if (!inDegree.has(parentId)) inDegree.set(parentId, 0)
-    }
-
-    // Kahn's algorithm for topological sort
-    const queue = [...inDegree.entries()]
-        .filter(([_, deg]) => deg === 0)
-        .map(([id]) => id)
-
-    const visited = new Set()
-    const output = []
-
-    while (queue.length > 0) {
-        const id = queue.shift()
-        if (visited.has(id)) continue
-        visited.add(id)
-
-        const comp = componentMap.get(id)
-        output.push(`[${comp.type}] ${comp.name} (${comp.id})`)
-
-        if (graph.has(id)) {
-            for (const childId of graph.get(id)) {
-                inDegree.set(childId, inDegree.get(childId) - 1)
-                if (inDegree.get(childId) === 0) {
-                    queue.push(childId)
-                }
-            }
-        }
-    }
-
-    return output
-}
-
-function groupComponentsByDeploymentStage(dependencies) {
-    const graph = new Map()
-    const inDegree = new Map()
-    const componentMap = new Map()
-
-    for (const dep of dependencies) {
-        const parentId = dep.RefMetadataComponentId
-        const childId = dep.MetadataComponentId
-
-        // Register metadata
+        const parentId = dep.RefMetadataComponentId;
+        const childId = dep.MetadataComponentId;
         componentMap.set(parentId, {
             id: parentId,
             name: dep.RefMetadataComponentName,
             type: dep.RefMetadataComponentType
         })
-
         componentMap.set(childId, {
             id: childId,
             name: dep.MetadataComponentName,
             type: dep.MetadataComponentType
         })
-
-        // Build graph
-        if (!graph.has(parentId)) graph.set(parentId, new Set())
-        graph.get(parentId).add(childId)
-
-        inDegree.set(childId, (inDegree.get(childId) || 0) + 1)
-        if (!inDegree.has(parentId)) inDegree.set(parentId, 0)
+        if (!graph.has(parentId)) graph.set(parentId, new Set());
+        graph.get(parentId).add(childId);
+        inDegree.set(childId, (inDegree.get(childId) || 0) + 1);
+        if (!inDegree.has(parentId)) inDegree.set(parentId, 0);
     }
-
-    const queue = [...inDegree.entries()]
-        .filter(([_, deg]) => deg === 0)
-        .map(([id]) => id)
-
-    const visited = new Set()
-    const result = []
-    let stageIndex = 1
-
+    const queue = [...inDegree.entries()].filter(([_, deg]) => deg === 0).map(([id]) => id)
+    const visited = new Set();
+    const result = [];
+    let stageIndex = 1;
     while (queue.length > 0) {
-        const nextQueue = []
-        const stageTypes = new Set()
-        const stageComponents = []
-
+        const nextQueue = [];
+        const stageComponents = [];
         for (const id of queue) {
-            if (visited.has(id)) continue
-            visited.add(id)
-
-            const comp = componentMap.get(id)
-            if (!stageTypes.has(comp.type)) {
-                stageTypes.add(comp.type)
-                stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`)
-            }
-
+            if (visited.has(id)) continue;
+            visited.add(id);
+            const comp = componentMap.get(id);
+            stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`);
             if (graph.has(id)) {
                 for (const childId of graph.get(id)) {
-                    inDegree.set(childId, inDegree.get(childId) - 1)
-                    if (inDegree.get(childId) === 0) {
-                        nextQueue.push(childId)
-                    }
-                }
-            }
-        }
-
-        if (stageComponents.length > 0) {
-            result.push(...stageComponents)
-            stageIndex++
-        }
-
-        queue.length = 0
-        queue.push(...nextQueue)
-    }
-
-    return result
-}
-
-function groupComponentsByDeploymentStage2(dependencies) {
-    const graph = new Map()
-    const inDegree = new Map()
-    const componentMap = new Map()
-
-    for (const dep of dependencies) {
-        const parentId = dep.RefMetadataComponentId
-        const childId = dep.MetadataComponentId
-
-        componentMap.set(parentId, {
-            id: parentId,
-            name: dep.RefMetadataComponentName,
-            type: dep.RefMetadataComponentType
-        })
-
-        componentMap.set(childId, {
-            id: childId,
-            name: dep.MetadataComponentName,
-            type: dep.MetadataComponentType
-        })
-
-        if (!graph.has(parentId)) graph.set(parentId, new Set())
-        graph.get(parentId).add(childId)
-
-        inDegree.set(childId, (inDegree.get(childId) || 0) + 1)
-        if (!inDegree.has(parentId)) inDegree.set(parentId, 0)
-    }
-
-    const queue = [...inDegree.entries()]
-        .filter(([_, deg]) => deg === 0)
-        .map(([id]) => id)
-
-    const visited = new Set()
-    const result = []
-    let stageIndex = 1
-
-    while (queue.length > 0) {
-        const nextQueue = []
-        const stageComponents = []
-
-        for (const id of queue) {
-            if (visited.has(id)) continue
-            visited.add(id)
-
-            const comp = componentMap.get(id)
-            stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`)
-
-            if (graph.has(id)) {
-                for (const childId of graph.get(id)) {
-                    inDegree.set(childId, inDegree.get(childId) - 1)
+                    inDegree.set(childId, inDegree.get(childId) - 1);
                     if (inDegree.get(childId) === 0) {
                         nextQueue.push(childId);
                     }
                 }
             }
         }
-
         if (stageComponents.length > 0) {
-            result.push(...stageComponents)
+            result.push(...stageComponents);
             stageIndex++
         }
-
-        queue.length = 0
-        queue.push(...nextQueue)
+        queue.length = 0;
+        queue.push(...nextQueue);
     }
     // stageIndex ++;
     const stageComponents = [];
-    [...inDegree.entries()].forEach(([k,v]) => {
-        if (v > 0) {
-            inDegree.set(k, 0)
-            const comp = componentMap.get(k)
-            stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`)
-        }
+    const rest = [...inDegree.entries()].filter(([_,v]) => v > 0);
+    console.debug('[*] rest:', rest);
+    rest.forEach(([k]) => {
+        inDegree.set(k, 0);
+        const comp = componentMap.get(k);
+        stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`);
     });
-    result.push(...stageComponents)
-
-    console.debug('inDegree > 0:', [...inDegree.entries()].filter(v => !visited.has(v[0]) && v[1] > 0));
-    // console.debug('graph:', [...graph.entries()]);
-
+    result.push(...stageComponents);
+    console.debug('inDegree > 0:', rest.filter(v => !visited.has(v[0])));
+    // console.debug('[*] graph:', graph);
     return result
 }
 
-
+// deployment stages
+function deploymentStages(dependencies) {
+    const components = {};
+    for (const dep of dependencies) {
+        const childId = dep.MetadataComponentId;
+        const parentId = dep.RefMetadataComponentId;
+        const child = components.hasOwnProperty(childId) ? components[childId] : components[childId] = {
+            id: dep.MetadataComponentId,
+            name: dep.MetadataComponentName,
+            type: dep.MetadataComponentType,
+            parents: {},
+            children: {},
+            related: {},
+            count: 0,
+        };
+        const parent = components.hasOwnProperty(parentId) ? components[parentId] : components[parentId] = {
+            id: dep.RefMetadataComponentId,
+            name: dep.RefMetadataComponentName,
+            type: dep.RefMetadataComponentType,
+            parents: {},
+            children: {},
+            related: {},
+            count: 0,
+        };
+        if (!parent.children.hasOwnProperty(childId)) parent.children[childId] = `${child.type} - ${child.name}`;
+        if (!child.parents.hasOwnProperty(parentId)) child.parents[parentId] = `${parent.type} - ${parent.name}`;
+        components[childId].count ++;
+        // for (const [key, val] of Object.entries(child.parents)) {
+        //     if (!components.hasOwnProperty(key)) continue;
+        //     const parent = components[key];
+        //     for (const [k, v] of Object.entries(parent.children)) {
+        //         if (k === childId) continue;
+        //         if (!child.related.hasOwnProperty(k) && components.hasOwnProperty(k)) {
+        //             const comp = components[k];
+        //             child.related[k] = `${v} (${val})`;
+        //             if (!comp.related.hasOwnProperty(childId)) {
+        //                 comp.related[k] = `${child.type} - ${child.name} (${val})`;
+        //             }
+        //         }
+        //     }
+        // }
+    }
+    const _load_related = (id) => {
+        const child = components[id];
+        const _add_parent = (parentId, ref=undefined) => {
+            const parent = components[parentId];
+            const parentVal = `${parent.type} - ${parent.name}`;
+            // if (!child.parents.hasOwnProperty(parentId)) {
+            //     child.related[parentId] = `${parentVal}${ref ? ` (${ref})` : ''} [p]`;
+            // }
+            for (const [key, val] of Object.entries(parent.children)) {
+                if (key === id || child.related.hasOwnProperty(key)) continue;
+                child.related[key] = `${val} (${ref ? ` (${ref})` : ''} - ${parentVal})`;
+                // for (const [k, v] of Object.entries(components[key].parents)) {
+                //     _add_parent(k, val);
+                // }
+            }
+        };
+        for (const [key] of Object.entries(child.parents)) {
+            _add_parent(key);
+        }
+    };
+    for (const [key, comp] of Object.entries(components)) {
+        _load_related(key);
+    }
+    const counts = Object.values(components).reduce((sum, v) => sum + v.count, 0);
+    console.debug('[+] counts:', counts, dependencies.length);
+    writeSync(DEPLOYMENTS_FILE, JSON.stringify(components, null, 4));
+    printLn(` └─ ${DEPLOYMENTS_FILE.substring(__dirname.length + 1)}`);
+}
 
 // Main
 (async () => {
@@ -724,21 +530,12 @@ function groupComponentsByDeploymentStage2(dependencies) {
         // command actions
         const args = process.argv.slice(2);
         const action = args[0];
-        const value = args[1];
         if (action === 'deps') {
-            console.debug('[~] parse dependencies...');
+            console.debug('[*] parse dependencies...');
             const records = readSync(DEPENDENCIES_FILE, 'json', undefined, 'utf8');
-            if (value === 'tree') { // node index.js deps tree
-                const tree = buildDependencyTree(records);
-                console.debug('[+] tree:', jsonStringify(tree, 4));
-            } else if (value === 'lines') { // node index.js deps lines
-                const lines = printDependencyLines(records);
-                console.debug('\n[~] lines:\n' + lines.map((v, i) =>`#${i + 1} ${v}`).join('\n'));
-            } else if (value === 'stages' || !value) { // node index.js deps stages
-                const lines = groupComponentsByDeploymentStage2(records);
-                console.debug('\n[~] stages:\n' + lines.map((v, i) =>`#${i + 1} ${v}`).join('\n'));
-            }
-            console.debug('[+] done.');
+            const lines = deploymentStages(records);
+            // console.debug('\n[~] stages:\n' + lines.map((v, i) =>`#${i + 1} ${v}`).join('\n'));
+            // console.debug('[+] done.');
             return;
         }
 
@@ -768,7 +565,7 @@ function groupComponentsByDeploymentStage2(dependencies) {
         const records = {
             package: {
                 id: 1,
-                random_id: uuid(),
+                random_id: _uuid(),
                 created_date: t1.toISOString(),
                 finished_date: null,
                 duration: 0,
