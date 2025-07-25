@@ -3,7 +3,7 @@ const fs = require('fs');
 const Path = require('path');
 const https = require('https');
 const { parseStringPromise } = require('xml2js');
-const { _uuid, Term, _jsonStringify } = require('xtutils');
+const { _uuid, Term, _jsonStringify, _sort } = require('xtutils');
 
 // Files
 const DUMP_DIR = Path.join(__dirname, '.dump.xx');
@@ -12,7 +12,8 @@ const SESSION_FILE = Path.join(DUMP_DIR, 'session.json');
 const METADATA_FILE = Path.join(DUMP_DIR, 'metadata.json');
 const RECORDS_FILE = Path.join(DUMP_DIR, 'records.json');
 const DEPENDENCIES_FILE = Path.join(DUMP_DIR, 'dependencies.json');
-const DEPLOYMENTS_FILE = Path.join(DUMP_DIR, 'deployments.json');
+const COMPONENTS_FILE = Path.join(DUMP_DIR, 'dependencies-components.json');
+const DEPLOYMENTS_FILE = Path.join(DUMP_DIR, 'dependencies-deployments.json');
 
 // Cache
 const Cache = {
@@ -476,50 +477,201 @@ function deploymentStages(dependencies) {
             related: {},
             count: 0,
         };
-        if (!parent.children.hasOwnProperty(childId)) parent.children[childId] = `${child.type} - ${child.name}`;
-        if (!child.parents.hasOwnProperty(parentId)) child.parents[parentId] = `${parent.type} - ${parent.name}`;
+        if (!parent.children.hasOwnProperty(childId) && !parent.parents.hasOwnProperty(childId)) parent.children[childId] = `${child.type} - ${child.name}`;
+        if (!child.parents.hasOwnProperty(parentId)) {
+            child.parents[parentId] = `${parent.type} - ${parent.name}`;
+            if (child.children.hasOwnProperty(parentId)) delete child.children[parentId];
+        }
         components[childId].count ++;
-        // for (const [key, val] of Object.entries(child.parents)) {
-        //     if (!components.hasOwnProperty(key)) continue;
-        //     const parent = components[key];
-        //     for (const [k, v] of Object.entries(parent.children)) {
-        //         if (k === childId) continue;
-        //         if (!child.related.hasOwnProperty(k) && components.hasOwnProperty(k)) {
-        //             const comp = components[k];
-        //             child.related[k] = `${v} (${val})`;
-        //             if (!comp.related.hasOwnProperty(childId)) {
-        //                 comp.related[k] = `${child.type} - ${child.name} (${val})`;
-        //             }
-        //         }
-        //     }
-        // }
+    }
+    for (const [key, comp] of Object.entries(components)) {
+        for (const k of Object.keys(comp.children)) {
+            const childVal = comp.children[k];
+            const child = components[k];
+            if (child.parents.hasOwnProperty(key) && key > k) {
+                const parentVal = child.parents[key];
+                delete comp.children[k];
+                delete child.parents[key];
+                comp.parents[k] = childVal;
+                child.children[key] = parentVal;
+                // for (const k2 of Object.keys(comp.children)) {
+                //     if (k2 === k) continue;
+                //     const comp2 = components[k2];
+                //     if (comp2.children.hasOwnProperty(k)) {
+                //         const childVal2 = comp2.parents[k];
+                //         delete comp2.children[k];
+                //         comp2.parents[k] = childVal2;
+                //     }
+                // }
+            }
+        }
+        for (const k of Object.keys(comp.parents)) {
+            if (components[k].parents.hasOwnProperty(key) && key < k) {
+                delete comp.parents[k];
+            }
+        }
     }
     const _load_related = (id) => {
         const child = components[id];
         const _add_parent = (parentId, ref=undefined) => {
             const parent = components[parentId];
             const parentVal = `${parent.type} - ${parent.name}`;
-            // if (!child.parents.hasOwnProperty(parentId)) {
-            //     child.related[parentId] = `${parentVal}${ref ? ` (${ref})` : ''} [p]`;
-            // }
             for (const [key, val] of Object.entries(parent.children)) {
-                if (key === id || child.related.hasOwnProperty(key)) continue;
-                child.related[key] = `${val} (${ref ? ` (${ref})` : ''} - ${parentVal})`;
-                // for (const [k, v] of Object.entries(components[key].parents)) {
-                //     _add_parent(k, val);
-                // }
+                if (key === id) continue;
+                for (const [k, v] of Object.entries(components[key].parents)) {
+                    if (k === id || child.related.hasOwnProperty(k) || child.parents.hasOwnProperty(k)) continue;
+                    child.related[k] = `${v} (${val} ~ ${key} > ${parentVal} ~ ${parentId})`;
+                }
             }
         };
         for (const [key] of Object.entries(child.parents)) {
             _add_parent(key);
         }
     };
-    for (const [key, comp] of Object.entries(components)) {
+    for (const [key] of Object.entries(components)) {
         _load_related(key);
     }
     const counts = Object.values(components).reduce((sum, v) => sum + v.count, 0);
-    console.debug('[+] counts:', counts, dependencies.length);
-    writeSync(DEPLOYMENTS_FILE, JSON.stringify(components, null, 4));
+    console.debug('[+] components:', Object.keys(components).length, counts, dependencies.length);
+    writeSync(COMPONENTS_FILE, JSON.stringify(components, null, 4));
+    printLn(` └─ ${COMPONENTS_FILE.substring(__dirname.length + 1)}`);
+    printLn('[*] parse deployments hierarchy...');
+    const dependents = {}, last_dependents = {};
+    const _is_class = (id) => components[id].type === 'ApexClass';
+    const _is_last = (id) => {
+        if (_is_class(id)) return true;
+        return Object.keys(components[id].parents).filter(k => _is_class(k)).length > 0;
+    };
+    for (const [key, comp] of Object.entries(components)) {
+        const { id, name, type } = comp;
+        const parents = Object.keys(comp.parents);
+        const related = Object.keys(comp.related).filter(k => !_is_last(k));
+        const children = Object.keys(comp.children).filter(k => !parents.includes(k));
+        const dep = {
+            id,
+            name,
+            type,
+            refs: new Set(parents),
+            related: new Set(related),
+            children: new Set(children),
+        };
+        if (_is_last(key)) last_dependents[key] = dep;
+        else dependents[key] = dep;
+    }
+    const deployed = new Set(), deployments = [], deployments_sort = [
+        // ['id','asc'],
+        ['name','asc'],
+        ['type','asc'],
+    ];
+    let deps_count = Object.keys(dependents).length, deps_done = 0;
+    const _add_dependents = () => {
+        const items = new Set();
+        const _items_add = (dep) => {
+            items.add(dep);
+            delete dependents[dep.id];
+        };
+        for (const [_, dep] of Object.entries(dependents)) {
+            if (dep.refs.size) continue;
+            _items_add(dep);
+        }
+        for (const [_, dep] of Object.entries(dependents)) {
+            for (const item of items) {
+                dep.refs.delete(item.id);
+                dep.related.delete(item.id);
+                dep.children.delete(item.id);
+            }
+        }
+        for (const [_, dep] of Object.entries(last_dependents)) {
+            for (const item of items) {
+                dep.refs.delete(item.id);
+                dep.related.delete(item.id);
+                dep.children.delete(item.id);
+            }
+        }
+        if (items.size) deployments.push(_sort([...items], deployments_sort).map(dep => {
+            deployed.add(dep.id);
+            return `${dep.id} - ${dep.type} - ${dep.name}`;
+        }));
+        const count = Object.values(dependents).filter(v => v.refs.size > 0).length;
+        const unchanged = deps_count === count;
+        deps_count = count;
+        if (unchanged) {
+            if (!deps_done) {
+                deps_done = 1;
+                _add_dependents();
+            }
+        }
+        else {
+            deps_done = Number(!count);
+            _add_dependents();
+        }
+    };
+    _add_dependents();
+    deps_count = deps_done = 0;
+    const _add_last_dependents = () => {
+        const seen = new Set();
+        const items = new Set();
+        const _items_add = (dep) => {
+            items.add(dep);
+            seen.add(dep.id);
+            delete last_dependents[dep.id];
+        };
+        const _add_children = (parentId) => {
+            for (const [_, dep] of Object.entries(last_dependents)) {
+                if (dep.refs.has(parentId)) {
+                    dep.refs.delete(parentId);
+                    if (!dep.refs.size) _items_add(dep);
+                }
+            }
+            for (const [_, dep] of Object.entries(last_dependents)) {
+                for (const item of items) {
+                    dep.refs.delete(item.id);
+                    dep.related.delete(item.id);
+                    dep.children.delete(item.id);
+                }
+            }
+        }
+        for (const [_, dep] of Object.entries(last_dependents)) {
+            if (!dep.refs.size) {
+                _items_add(dep);
+                _add_children(dep.id);
+            }
+        }
+        for (const [_, dep] of Object.entries(last_dependents)) {
+            for (const item of items) {
+                dep.refs.delete(item.id);
+                dep.related.delete(item.id);
+                dep.children.delete(item.id);
+            }
+        }
+        if (items.size) deployments.push(_sort([...items], deployments_sort).map(dep => {
+        // if (items.size) deployments.push(([...items]).map(dep => {
+            deployed.add(dep.id);
+            return `# ${dep.id} - ${dep.type} - ${dep.name}`;
+        }));
+        const count = Object.values(last_dependents).filter(v => v.refs.size > 0).length;
+        const unchanged = deps_count === count;
+        deps_count = count;
+        if (unchanged) {
+            if (!deps_done) {
+                deps_done = 1;
+                _add_last_dependents();
+            }
+        }
+        else if (count > 1) {
+            deps_done = Number(!count);
+            _add_last_dependents();
+        }
+    };
+    _add_last_dependents();
+
+    // save deployments
+    console.debug('[+] Deployments:', deployments.length, deployments.reduce((sum, arr) => sum + arr.length, 0), Object.keys(components).length);
+    writeSync(DEPLOYMENTS_FILE, _jsonStringify({
+        deployments,
+        dependents: Object.fromEntries(Object.entries(dependents).filter(([_, dep]) => !deployed.has(dep.id) || dep.refs.size > 0 || dep.related.size > 0)),
+        last_dependents: Object.fromEntries(Object.entries(last_dependents).filter(([_, dep]) => !deployed.has(dep.id) || dep.refs.size > 0 || dep.related.size > 0)),
+    }, 4));
     printLn(` └─ ${DEPLOYMENTS_FILE.substring(__dirname.length + 1)}`);
 }
 
@@ -533,9 +685,7 @@ function deploymentStages(dependencies) {
         if (action === 'deps') {
             console.debug('[*] parse dependencies...');
             const records = readSync(DEPENDENCIES_FILE, 'json', undefined, 'utf8');
-            const lines = deploymentStages(records);
-            // console.debug('\n[~] stages:\n' + lines.map((v, i) =>`#${i + 1} ${v}`).join('\n'));
-            // console.debug('[+] done.');
+            const deps = deploymentStages(records);
             return;
         }
 
