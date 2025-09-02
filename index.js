@@ -675,6 +675,115 @@ function deploymentStages(dependencies) {
     printLn(` └─ ${DEPLOYMENTS_FILE.substring(__dirname.length + 1)}`);
 }
 
+// deployment stages
+function orderDeps(dependencies) {
+    dependencies = Array.isArray(dependencies) ? dependencies : [];
+    const map = {};
+    const parents = {};
+    const children = {};
+    for (const dep of dependencies) {
+        const { MetadataComponentId: id, RefMetadataComponentId: pid } = dep;
+        map[id] = dep;
+        if (!parents.hasOwnProperty(id)) parents[id] = new Set();
+        parents[id].add(pid);
+        if (!children.hasOwnProperty(pid)) children[pid] = new Set();
+        children[pid].add(id);
+    }
+}
+
+function createDeploymentGroups(dependencies) {
+    // Create a map of all components and their dependencies
+    const components = new Map();
+    const inDegree = new Map();
+    
+    // Initialize components and their dependencies
+    dependencies.forEach(dep => {
+        // Add the main component
+        if (!components.has(dep.MetadataComponentId)) {
+            components.set(dep.MetadataComponentId, {
+                id: dep.MetadataComponentId,
+                name: dep.MetadataComponentName,
+                type: dep.MetadataComponentType,
+                dependencies: new Set()
+            });
+            inDegree.set(dep.MetadataComponentId, 0);
+        }
+
+        // Add the referenced component if it doesn't exist
+        if (!components.has(dep.RefMetadataComponentId)) {
+            components.set(dep.RefMetadataComponentId, {
+                id: dep.RefMetadataComponentId,
+                name: dep.RefMetadataComponentName,
+                type: dep.RefMetadataComponentType,
+                dependencies: new Set()
+            });
+            inDegree.set(dep.RefMetadataComponentId, 0);
+        }
+
+        // Add dependency relationship if not self-referencing
+        if (dep.MetadataComponentId !== dep.RefMetadataComponentId) {
+            const component = components.get(dep.MetadataComponentId);
+            if (!component.dependencies.has(dep.RefMetadataComponentId)) {
+                component.dependencies.add(dep.RefMetadataComponentId);
+                inDegree.set(dep.MetadataComponentId, inDegree.get(dep.MetadataComponentId) + 1);
+            }
+        }
+    });
+
+    // Prepare for topological sort
+    const queue = [];
+    const groups = [];
+    
+    // Find all nodes with no incoming dependencies
+    inDegree.forEach((degree, id) => {
+        if (degree === 0) {
+            queue.push(id);
+        }
+    });
+
+    // Perform topological sort
+    while (queue.length > 0) {
+        const currentLevel = [];
+        const levelSize = queue.length;
+
+        for (let i = 0; i < levelSize; i++) {
+            const nodeId = queue.shift();
+            currentLevel.push(components.get(nodeId));
+
+            // Decrease in-degree of neighbors
+            components.forEach(component => {
+                if (component.dependencies.has(nodeId)) {
+                    const newDegree = inDegree.get(component.id) - 1;
+                    inDegree.set(component.id, newDegree);
+                    
+                    if (newDegree === 0) {
+                        queue.push(component.id);
+                    }
+                }
+            });
+        }
+        
+        groups.push(currentLevel);
+    }
+
+    // Check for circular dependencies
+    let hasCircularDependencies = false;
+    const circ = {};
+    inDegree.forEach((degree, key) => {
+        if (degree > 0) {
+            hasCircularDependencies = true;
+            circ[key] = degree;
+        }
+    });
+
+    if (hasCircularDependencies) {
+        console.warn('Warning: Circular dependencies detected. Some components may not be properly grouped.', circ);
+    }
+
+    return groups;
+}
+
+
 // Main
 (async () => {
     try {
@@ -685,7 +794,16 @@ function deploymentStages(dependencies) {
         if (action === 'deps') {
             console.debug('[*] parse dependencies...');
             const records = readSync(DEPENDENCIES_FILE, 'json', undefined, 'utf8');
-            const deps = deploymentStages(records);
+            // const deps = deploymentStages(records);
+
+            const deploymentGroups = createDeploymentGroups(records);
+            deploymentGroups.forEach((group, index) => {
+                console.log(`Group ${index + 1}:`);
+                group.forEach(component => {
+                    console.log(`  ${component.type}: ${component.name} (${component.id})`);
+                });
+            });
+
             return;
         }
 
