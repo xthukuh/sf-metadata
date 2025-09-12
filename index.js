@@ -14,6 +14,7 @@ const RECORDS_FILE = Path.join(DUMP_DIR, 'records.json');
 const DEPENDENCIES_FILE = Path.join(DUMP_DIR, 'dependencies.json');
 const COMPONENTS_FILE = Path.join(DUMP_DIR, 'dependencies-components.json');
 const DEPLOYMENTS_FILE = Path.join(DUMP_DIR, 'dependencies-deployments.json');
+const PACKAGE_FILE = Path.join(DUMP_DIR, 'package.xml');
 
 // Cache
 const Cache = {
@@ -386,401 +387,202 @@ async function query(soql, tooling = false, tag = undefined, file = undefined) {
     return records;
 }
 
-// deployment stages
-function deploymentStages2(dependencies) {
-    const graph = new Map();
-    const inDegree = new Map();
-    const componentMap = new Map();
-
-    for (const dep of dependencies) {
-        const parentId = dep.RefMetadataComponentId;
-        const childId = dep.MetadataComponentId;
-        componentMap.set(parentId, {
-            id: parentId,
-            name: dep.RefMetadataComponentName,
-            type: dep.RefMetadataComponentType
-        })
-        componentMap.set(childId, {
-            id: childId,
-            name: dep.MetadataComponentName,
-            type: dep.MetadataComponentType
-        })
-        if (!graph.has(parentId)) graph.set(parentId, new Set());
-        graph.get(parentId).add(childId);
-        inDegree.set(childId, (inDegree.get(childId) || 0) + 1);
-        if (!inDegree.has(parentId)) inDegree.set(parentId, 0);
-    }
-    const queue = [...inDegree.entries()].filter(([_, deg]) => deg === 0).map(([id]) => id)
-    const visited = new Set();
-    const result = [];
-    let stageIndex = 1;
-    while (queue.length > 0) {
-        const nextQueue = [];
-        const stageComponents = [];
-        for (const id of queue) {
-            if (visited.has(id)) continue;
-            visited.add(id);
-            const comp = componentMap.get(id);
-            stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`);
-            if (graph.has(id)) {
-                for (const childId of graph.get(id)) {
-                    inDegree.set(childId, inDegree.get(childId) - 1);
-                    if (inDegree.get(childId) === 0) {
-                        nextQueue.push(childId);
-                    }
-                }
-            }
-        }
-        if (stageComponents.length > 0) {
-            result.push(...stageComponents);
-            stageIndex++
-        }
-        queue.length = 0;
-        queue.push(...nextQueue);
-    }
-    // stageIndex ++;
-    const stageComponents = [];
-    const rest = [...inDegree.entries()].filter(([_,v]) => v > 0);
-    console.debug('[*] rest:', rest);
-    rest.forEach(([k]) => {
-        inDegree.set(k, 0);
-        const comp = componentMap.get(k);
-        stageComponents.push(`${stageIndex} [${comp.type}] ${comp.name} (${comp.id})`);
-    });
-    result.push(...stageComponents);
-    console.debug('inDegree > 0:', rest.filter(v => !visited.has(v[0])));
-    // console.debug('[*] graph:', graph);
-    return result
-}
-
-// deployment stages
-function deploymentStages(dependencies) {
-    const components = {};
-    for (const dep of dependencies) {
-        const childId = dep.MetadataComponentId;
-        const parentId = dep.RefMetadataComponentId;
-        const child = components.hasOwnProperty(childId) ? components[childId] : components[childId] = {
-            id: dep.MetadataComponentId,
-            name: dep.MetadataComponentName,
-            type: dep.MetadataComponentType,
-            parents: {},
-            children: {},
-            related: {},
-            count: 0,
-        };
-        const parent = components.hasOwnProperty(parentId) ? components[parentId] : components[parentId] = {
-            id: dep.RefMetadataComponentId,
-            name: dep.RefMetadataComponentName,
-            type: dep.RefMetadataComponentType,
-            parents: {},
-            children: {},
-            related: {},
-            count: 0,
-        };
-        if (!parent.children.hasOwnProperty(childId) && !parent.parents.hasOwnProperty(childId)) parent.children[childId] = `${child.type} - ${child.name}`;
-        if (!child.parents.hasOwnProperty(parentId)) {
-            child.parents[parentId] = `${parent.type} - ${parent.name}`;
-            if (child.children.hasOwnProperty(parentId)) delete child.children[parentId];
-        }
-        components[childId].count ++;
-    }
-    for (const [key, comp] of Object.entries(components)) {
-        for (const k of Object.keys(comp.children)) {
-            const childVal = comp.children[k];
-            const child = components[k];
-            if (child.parents.hasOwnProperty(key) && key > k) {
-                const parentVal = child.parents[key];
-                delete comp.children[k];
-                delete child.parents[key];
-                comp.parents[k] = childVal;
-                child.children[key] = parentVal;
-                // for (const k2 of Object.keys(comp.children)) {
-                //     if (k2 === k) continue;
-                //     const comp2 = components[k2];
-                //     if (comp2.children.hasOwnProperty(k)) {
-                //         const childVal2 = comp2.parents[k];
-                //         delete comp2.children[k];
-                //         comp2.parents[k] = childVal2;
-                //     }
-                // }
-            }
-        }
-        for (const k of Object.keys(comp.parents)) {
-            if (components[k].parents.hasOwnProperty(key) && key < k) {
-                delete comp.parents[k];
-            }
-        }
-    }
-    const _load_related = (id) => {
-        const child = components[id];
-        const _add_parent = (parentId, ref=undefined) => {
-            const parent = components[parentId];
-            const parentVal = `${parent.type} - ${parent.name}`;
-            for (const [key, val] of Object.entries(parent.children)) {
-                if (key === id) continue;
-                for (const [k, v] of Object.entries(components[key].parents)) {
-                    if (k === id || child.related.hasOwnProperty(k) || child.parents.hasOwnProperty(k)) continue;
-                    child.related[k] = `${v} (${val} ~ ${key} > ${parentVal} ~ ${parentId})`;
-                }
-            }
-        };
-        for (const [key] of Object.entries(child.parents)) {
-            _add_parent(key);
-        }
-    };
-    for (const [key] of Object.entries(components)) {
-        _load_related(key);
-    }
-    const counts = Object.values(components).reduce((sum, v) => sum + v.count, 0);
-    console.debug('[+] components:', Object.keys(components).length, counts, dependencies.length);
-    writeSync(COMPONENTS_FILE, JSON.stringify(components, null, 4));
-    printLn(` └─ ${COMPONENTS_FILE.substring(__dirname.length + 1)}`);
-    printLn('[*] parse deployments hierarchy...');
-    const dependents = {}, last_dependents = {};
-    const _is_class = (id) => components[id].type === 'ApexClass';
-    const _is_last = (id) => {
-        if (_is_class(id)) return true;
-        return Object.keys(components[id].parents).filter(k => _is_class(k)).length > 0;
-    };
-    for (const [key, comp] of Object.entries(components)) {
-        const { id, name, type } = comp;
-        const parents = Object.keys(comp.parents);
-        const related = Object.keys(comp.related).filter(k => !_is_last(k));
-        const children = Object.keys(comp.children).filter(k => !parents.includes(k));
-        const dep = {
-            id,
-            name,
-            type,
-            refs: new Set(parents),
-            related: new Set(related),
-            children: new Set(children),
-        };
-        if (_is_last(key)) last_dependents[key] = dep;
-        else dependents[key] = dep;
-    }
-    const deployed = new Set(), deployments = [], deployments_sort = [
-        // ['id','asc'],
-        ['name','asc'],
-        ['type','asc'],
-    ];
-    let deps_count = Object.keys(dependents).length, deps_done = 0;
-    const _add_dependents = () => {
-        const items = new Set();
-        const _items_add = (dep) => {
-            items.add(dep);
-            delete dependents[dep.id];
-        };
-        for (const [_, dep] of Object.entries(dependents)) {
-            if (dep.refs.size) continue;
-            _items_add(dep);
-        }
-        for (const [_, dep] of Object.entries(dependents)) {
-            for (const item of items) {
-                dep.refs.delete(item.id);
-                dep.related.delete(item.id);
-                dep.children.delete(item.id);
-            }
-        }
-        for (const [_, dep] of Object.entries(last_dependents)) {
-            for (const item of items) {
-                dep.refs.delete(item.id);
-                dep.related.delete(item.id);
-                dep.children.delete(item.id);
-            }
-        }
-        if (items.size) deployments.push(_sort([...items], deployments_sort).map(dep => {
-            deployed.add(dep.id);
-            return `${dep.id} - ${dep.type} - ${dep.name}`;
-        }));
-        const count = Object.values(dependents).filter(v => v.refs.size > 0).length;
-        const unchanged = deps_count === count;
-        deps_count = count;
-        if (unchanged) {
-            if (!deps_done) {
-                deps_done = 1;
-                _add_dependents();
-            }
-        }
-        else {
-            deps_done = Number(!count);
-            _add_dependents();
-        }
-    };
-    _add_dependents();
-    deps_count = deps_done = 0;
-    const _add_last_dependents = () => {
-        const seen = new Set();
-        const items = new Set();
-        const _items_add = (dep) => {
-            items.add(dep);
-            seen.add(dep.id);
-            delete last_dependents[dep.id];
-        };
-        const _add_children = (parentId) => {
-            for (const [_, dep] of Object.entries(last_dependents)) {
-                if (dep.refs.has(parentId)) {
-                    dep.refs.delete(parentId);
-                    if (!dep.refs.size) _items_add(dep);
-                }
-            }
-            for (const [_, dep] of Object.entries(last_dependents)) {
-                for (const item of items) {
-                    dep.refs.delete(item.id);
-                    dep.related.delete(item.id);
-                    dep.children.delete(item.id);
-                }
-            }
-        }
-        for (const [_, dep] of Object.entries(last_dependents)) {
-            if (!dep.refs.size) {
-                _items_add(dep);
-                _add_children(dep.id);
-            }
-        }
-        for (const [_, dep] of Object.entries(last_dependents)) {
-            for (const item of items) {
-                dep.refs.delete(item.id);
-                dep.related.delete(item.id);
-                dep.children.delete(item.id);
-            }
-        }
-        if (items.size) deployments.push(_sort([...items], deployments_sort).map(dep => {
-        // if (items.size) deployments.push(([...items]).map(dep => {
-            deployed.add(dep.id);
-            return `# ${dep.id} - ${dep.type} - ${dep.name}`;
-        }));
-        const count = Object.values(last_dependents).filter(v => v.refs.size > 0).length;
-        const unchanged = deps_count === count;
-        deps_count = count;
-        if (unchanged) {
-            if (!deps_done) {
-                deps_done = 1;
-                _add_last_dependents();
-            }
-        }
-        else if (count > 1) {
-            deps_done = Number(!count);
-            _add_last_dependents();
-        }
-    };
-    _add_last_dependents();
-
-    // save deployments
-    console.debug('[+] Deployments:', deployments.length, deployments.reduce((sum, arr) => sum + arr.length, 0), Object.keys(components).length);
-    writeSync(DEPLOYMENTS_FILE, _jsonStringify({
-        deployments,
-        dependents: Object.fromEntries(Object.entries(dependents).filter(([_, dep]) => !deployed.has(dep.id) || dep.refs.size > 0 || dep.related.size > 0)),
-        last_dependents: Object.fromEntries(Object.entries(last_dependents).filter(([_, dep]) => !deployed.has(dep.id) || dep.refs.size > 0 || dep.related.size > 0)),
-    }, 4));
-    printLn(` └─ ${DEPLOYMENTS_FILE.substring(__dirname.length + 1)}`);
-}
-
-// deployment stages
-function orderDeps(dependencies) {
-    dependencies = Array.isArray(dependencies) ? dependencies : [];
-    const map = {};
-    const parents = {};
-    const children = {};
-    for (const dep of dependencies) {
-        const { MetadataComponentId: id, RefMetadataComponentId: pid } = dep;
-        map[id] = dep;
-        if (!parents.hasOwnProperty(id)) parents[id] = new Set();
-        parents[id].add(pid);
-        if (!children.hasOwnProperty(pid)) children[pid] = new Set();
-        children[pid].add(id);
-    }
-}
-
+// deployment groups
 function createDeploymentGroups(dependencies) {
+
     // Create a map of all components and their dependencies
     const components = new Map();
     const inDegree = new Map();
     
     // Initialize components and their dependencies
-    dependencies.forEach(dep => {
+    for (const dep of dependencies) {
+        const {
+            MetadataComponentType: type,
+            MetadataComponentName: name,
+            MetadataComponentId: id,
+            RefMetadataComponentType: rType,
+            RefMetadataComponentName: rName,
+            RefMetadataComponentId: rId,
+        } = dep;
+
         // Add the main component
-        if (!components.has(dep.MetadataComponentId)) {
-            components.set(dep.MetadataComponentId, {
-                id: dep.MetadataComponentId,
-                name: dep.MetadataComponentName,
-                type: dep.MetadataComponentType,
-                dependencies: new Set()
-            });
-            inDegree.set(dep.MetadataComponentId, 0);
+        if (!components.has(id)) {
+            components.set(id, {id, name, type, dependencies: []});
+            inDegree.set(id, 0);
         }
 
-        // Add the referenced component if it doesn't exist
-        if (!components.has(dep.RefMetadataComponentId)) {
-            components.set(dep.RefMetadataComponentId, {
-                id: dep.RefMetadataComponentId,
-                name: dep.RefMetadataComponentName,
-                type: dep.RefMetadataComponentType,
-                dependencies: new Set()
-            });
-            inDegree.set(dep.RefMetadataComponentId, 0);
+        // Add the referenced component
+        if (!components.has(rId)) {
+            components.set(rId, {id: rId, name: rName, type: rType, dependencies: []});
+            inDegree.set(rId, 0);
         }
 
         // Add dependency relationship if not self-referencing
-        if (dep.MetadataComponentId !== dep.RefMetadataComponentId) {
-            const component = components.get(dep.MetadataComponentId);
-            if (!component.dependencies.has(dep.RefMetadataComponentId)) {
-                component.dependencies.add(dep.RefMetadataComponentId);
-                inDegree.set(dep.MetadataComponentId, inDegree.get(dep.MetadataComponentId) + 1);
+        if (id !== rId) {
+            const component = components.get(id);
+            if (!component.dependencies.includes(rId)) {
+                component.dependencies.push(rId);
+                inDegree.set(id, inDegree.get(id) + 1);
             }
         }
-    });
+    }
+
+    // Fix parent-child circular dependencies
+    for (const [id, comp] of components.entries()) {
+        const remove = [];
+        for (let i = 0; i < comp.dependencies.length; i ++) {
+            const depId = comp.dependencies[i];
+            if (components.get(depId).dependencies.includes(id)) remove.push(depId);
+        }
+        if (remove.length) {
+            comp.dependencies = comp.dependencies.filter(v => !remove.includes(v));
+            inDegree.set(id, inDegree.get(id) - remove.length);
+        }
+    }
+
+    // helper - string similarity
+    const _similarity = (a, b) => {
+        a = a.toLowerCase();
+        b = b.toLowerCase();
+        if (a === b) return 100;
+        const m = a.length;
+        const n = b.length;
+        const dp = [];
+        for (let i = 0; i <= m; i ++) {
+            dp[i] = [];
+            for (let j = 0; j <= n; j ++) {
+                    if (i === 0) dp[i][j] = j;
+                    else if (j === 0) dp[i][j] = i;
+                    else dp[i][j] = Math.min(
+                        dp[i - 1][j] + 1,
+                        dp[i][j - 1] + 1,
+                        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+                    );
+            }
+        }
+        const editDistance = dp[m][n];
+        const maxLen = Math.max(m, n);
+        const similarity = ((maxLen - editDistance) / maxLen) * 100;
+        return Math.round(similarity);
+    };
+
+    // Map apex test classes
+    const testClasses = {};
+    const testParents = {};
+    const _addTestClass = (name, id) => {
+        name = name.replace(/_?(unit)?test$/i, '');
+        const matches = Array.from(components.values())
+        .map(comp => {
+            if (!(comp.type === 'ApexClass' && !/test$/i.test(comp.name))) return undefined;
+            const sim = _similarity(name, comp.name);
+            return [comp.id, comp.name, sim];
+        })
+        .filter(v => v && v[2] > 50)
+        .sort((a,b)=> a[2] > b[2] ? -1 : a[2] < b[2] ? 1 : 0);
+        testClasses[id] = undefined;
+        if (matches.length) {
+            const match = matches[0];
+            testParents[match[0]] = id;
+            testClasses[id] = match[0];
+        }
+    };
+    for (const {id, type, name} of components.values()) {
+        if (type == 'ApexClass' && /test$/i.test(name)) _addTestClass(name, id);
+    }
 
     // Prepare for topological sort
     const queue = [];
     const groups = [];
     
     // Find all nodes with no incoming dependencies
-    inDegree.forEach((degree, id) => {
-        if (degree === 0) {
-            queue.push(id);
-        }
-    });
+    for (const [id, degree] of inDegree.entries()) {
+        if (degree === 0) queue.push(id);
+    }
 
     // Perform topological sort
+    const untested = new Set();
+    const seenSet = new Set();
     while (queue.length > 0) {
         const currentLevel = [];
         const levelSize = queue.length;
 
-        for (let i = 0; i < levelSize; i++) {
-            const nodeId = queue.shift();
-            currentLevel.push(components.get(nodeId));
+        for (let i = 0; i < levelSize; i ++) {
+            const id = queue.shift();
+            if (seenSet.has(id)) continue;
+            const comp = components.get(id);
+
+            // Prevent adding test class without parent
+            if (comp.type === 'ApexClass' && /test$/i.test(comp.name) && !!testClasses[comp.id]) continue;
+            
+            // Add component to queue
+            comp.dependencies.length = 0; // clear dependencies
+            currentLevel.push(comp);
+            seenSet.add(id);
+            const nodeIds = [id];
+
+            // Add related apex test class component
+            if (comp.type === 'ApexClass') {
+                if (!/test$/i.test(comp.name)) {
+                    const testId = testParents[comp.id];
+                    delete testParents[comp.id];
+                    delete testClasses[testId];
+                    if (testId && !seenSet.has(testId)) {
+                        const testCmp = components.get(testId);
+                        testCmp.dependencies.length = 0; // clear dependencies
+                        currentLevel.push(testCmp);
+                        inDegree.set(testId, 0);
+                        seenSet.add(testId);
+                        nodeIds.push(testId);
+                    }
+                    if (!testId) untested.add(comp.id);
+                }
+                else if (testClasses.hasOwnProperty(comp.id) && !testClasses[comp.id]) delete testClasses[comp.id];
+            }
 
             // Decrease in-degree of neighbors
-            components.forEach(component => {
-                if (component.dependencies.has(nodeId)) {
-                    const newDegree = inDegree.get(component.id) - 1;
-                    inDegree.set(component.id, newDegree);
-                    
-                    if (newDegree === 0) {
-                        queue.push(component.id);
-                    }
+            for (const cmp of components.values()) {
+                for (const nodeId of nodeIds) {
+                    const depIndex = cmp.dependencies.findIndex(v => v === nodeId);
+                    if (depIndex < 0) continue;
+                    cmp.dependencies.splice(depIndex, 1); // remove dependency
+                    const newDegree = inDegree.get(cmp.id) - 1;
+                    inDegree.set(cmp.id, newDegree);
+                    if (newDegree === 0) queue.push(cmp.id);
                 }
-            });
+            }
         }
         
+        // add group
         groups.push(currentLevel);
     }
 
-    // Check for circular dependencies
-    let hasCircularDependencies = false;
-    const circ = {};
-    inDegree.forEach((degree, key) => {
-        if (degree > 0) {
-            hasCircularDependencies = true;
-            circ[key] = degree;
-        }
-    });
-
-    if (hasCircularDependencies) {
-        console.warn('Warning: Circular dependencies detected. Some components may not be properly grouped.', circ);
+    // Check not added
+    for (const comp of components.values()) {
+        if (seenSet.has(comp.id)) continue;
+        console.warn(`[-] not added: ${comp.id} "${comp.name}" - ${inDegree.get(comp.id)}`);
     }
 
-    return groups;
+    // Check for circular dependencies
+    let hasDeps = false, circ = {};
+    for (const [id, degree] of inDegree.entries()) {
+        if (!degree) continue;
+        const comp = components.get(id);
+        comp.dependencies = comp.dependencies.map(k => `${k} - "${components.get(k).name}"`);
+        comp._degree = degree;
+        circ[id] = comp;
+        hasDeps = true;
+    }
+    if (hasDeps) console.warn('[-] Circular dependencies: ', JSON.stringify(circ, [][0], 4));
+
+    // Check missed test classes
+    const missed = Object.keys(testClasses);
+    if (missed.length) console.warn(`[-] Missed ${missed.length} test classes:`, JSON.stringify(Object.fromEntries(missed.map(k => [`${k} - ${components.get(k).name}`, `${testClasses[k] ? components.get(testClasses[k]).name : testClasses[k]}`])), [][0], 4));
+    
+    // result - sorted
+    return {
+        groups: groups.map(group=>group.slice().sort((a,b) => a.type.localeCompare(b.type))),
+        untested: Array.from(untested),
+    };
 }
 
 
@@ -794,15 +596,16 @@ function createDeploymentGroups(dependencies) {
         if (action === 'deps') {
             console.debug('[*] parse dependencies...');
             const records = readSync(DEPENDENCIES_FILE, 'json', undefined, 'utf8');
-            // const deps = deploymentStages(records);
-
-            const deploymentGroups = createDeploymentGroups(records);
-            deploymentGroups.forEach((group, index) => {
-                console.log(`Group ${index + 1}:`);
-                group.forEach(component => {
-                    console.log(`  ${component.type}: ${component.name} (${component.id})`);
-                });
-            });
+            const {groups, untested} = createDeploymentGroups(records);
+            for (let i = 0;  i < groups.length; i ++) {
+                console.log(`\nGroup ${i + 1}:`);
+                const group = groups[i];
+                for (let j = 0; j < group.length; j ++) {
+                    const {id, type, name} = group[j];
+                    const pre = ` ${j + 1 === group.length ? '└───' : '├───'}`;
+                    console.debug(`${pre} ${type}: ${name} (${id})${untested.includes(id) ? ' -- UNTESTED' : ''}`);
+                }
+            };
 
             return;
         }
@@ -825,11 +628,28 @@ function createDeploymentGroups(dependencies) {
             'all dependencies',
             DEPENDENCIES_FILE
         );
+        const deps = {};
+        printLn(`[*] Dependency deployment groups...`);
+        const {groups, untested} = createDeploymentGroups(dependencies);
+        for (let i = 0;  i < groups.length; i ++) {
+            const group = groups[i];
+            printLn(` ├─ group (${i + 1}/${groups.length}) - count: ${group.length}`);
+            for (let j = 0; j < group.length; j ++) {
+                const comp = group[j];
+                comp._group = i;
+                comp._index = j;
+                comp._untested = untested.includes(comp.id);
+                if (comp._untested) printLn(` ├─ untested: ${comp.type} ${comp.name} - ${comp.id}`);
+                deps[comp.id] = comp;
+            }
+        };
+        printLn(` └─ groups: ${groups.length}, untested: ${untested.length}`);
 
         // describe all metadata
         const metadata = await describeMetadata();
 
         // parse records - start
+        printLn('[~] Parse records...');
         const records = {
             package: {
                 id: 1,
@@ -848,6 +668,8 @@ function createDeploymentGroups(dependencies) {
             },
             componentTypes: {},
             components: {},
+            groups,
+            untested,
         };
         const _includeComponent = (component) => {
             const opt = records.package.component_option;
@@ -1056,8 +878,105 @@ function createDeploymentGroups(dependencies) {
         records.package.finished_date = t2.toISOString();
         records.package.duration = `${(t2.getTime() - t1.getTime())/1000} seconds`;
         writeSync(RECORDS_FILE, JSON.stringify(records, undefined, 4));
-        printLn('[+] Done.');
+        printLn('[+] Parsed complete.');
+        printLn(` ├─ componentTypes: ${Object.keys(records.componentTypes).length}, components: ${Object.keys(records.components).length}, deps: ${Object.keys(deps).length}`);
         printLn(` └─ ${RECORDS_FILE.substring(__dirname.length + 1)}`);
+
+        // build package xml
+        const _build_package_xml = (group=undefined) => {
+            let count = 0;
+            const root = {
+                tag: 'Package',
+                attrs: [
+                    ['xmlns','http://soap.sforce.com/2006/04/metadata'],
+                ],
+                children: [],
+            };
+            const tab = '    ', tests = [];
+            const is_grouped = Number.isInteger(group) && group >= -1;
+            const _sort_by_name = arr => arr.slice().sort((a,b) => a.name.localeCompare(b.name));
+            const types = _sort_by_name(Object.values(records.componentTypes));
+            for (const type of types) {
+                const members = [];
+                for (const key of (Array.isArray(type.components) ? type.components : [])) {
+                    const comp = records.components[key];
+                    if (Object(comp) !== comp) {
+                        console.warn(`[-] invalid type component: ${key}`);
+                        continue;
+                    }
+                    if (is_grouped) {
+                        const dep = deps[comp.id];
+                        let g = parseInt(dep?._group);
+                        if (!(Number.isInteger(g) && g >= 0)) g = -1;
+                        if (g === group) members.push(comp);
+                    }
+                    else members.push(comp);
+                }
+                if (members.length) {
+                    const node = {tag: 'types', children: []};
+                    const members_list = _sort_by_name(members);
+                    for (const comp of members_list) {
+                        if (comp.type == 'ApexClass' && /test$/i.test(comp.name) && !tests.includes(comp.name)) tests.push(comp.name);
+                        node.children.push({tag: 'members', value: comp.name});
+                    }
+                    node.children.push({tag: 'name', value: type.name});
+                    count += members.length;
+                    root.children.push(node);
+                }
+                else if (!is_grouped) {
+                    root.children.push({
+                        tag: 'types',
+                        children: [
+                            {tag: 'members', value: '*'},
+                            {tag: 'name', value: type.name},
+                        ],
+                    });
+                }
+            }
+            root.children.push({tag: 'version', value: records.package.api_version});
+            const _xml_node = (node, indent = '') => {
+                if (Object(node) !== node) return '';
+                const lines = [];
+                const {tag, attrs, children, value} = node;
+                const tag_start = `<${tag}${Array.isArray(attrs) && attrs.length ? ' ' + attrs.map(([k,v]) => `${k}="${v}"`).join(' ') : ''}>`;
+                const tag_end = `</${tag}>`;
+                if (Array.isArray(children) && children.length) {
+                    lines.push(indent + tag_start);
+                    for (const child of children) {
+                        lines.push(_xml_node(child, indent + tab));
+                    }
+                    lines.push(indent + tag_end);
+                }
+                else lines.push(indent + tag_start + String(value ?? '') + tag_end);
+                return lines.join('\n');
+            };
+            return {
+                count,
+                tests,
+                tree: root,
+                text: _xml_node(root),
+            }
+        };
+
+        // build all
+        const package_xml = _build_package_xml();
+        const package_xml_file = PACKAGE_FILE.replace(/package\.xml$/, 'package-all.xml');
+        const package_xml_text = package_xml.text + '\n';
+        writeSync(package_xml_file, package_xml_text);
+        printLn(`[+] Build package xml (all) - "${package_xml_file.substring(__dirname.length + 1)}" ~ count: ${package_xml.count}, tests: ${package_xml.tests.join(', ')}`);
+        
+        // build groups
+        for (let i = 0; i <= groups.length; i ++) {
+            const g = i - 1;
+            const package_xml = _build_package_xml(g);
+            const package_xml_file = PACKAGE_FILE.replace(/package\.xml$/, `package-group-${g + 1}.xml`);
+            const package_xml_text = package_xml.text + '\n';
+            writeSync(package_xml_file, package_xml_text);
+            printLn(`[+] Build package xml (${g + 1}) - "${package_xml_file.substring(__dirname.length + 1)}" ~ count: ${package_xml.count}, tests: ${package_xml.tests.join(', ')}`);
+        }
+
+        // Done
+        printLn('[+] done.');
     }
     catch (err) {
         console.error('[!] FAILURE: ', err);

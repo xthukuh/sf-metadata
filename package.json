@@ -14,6 +14,7 @@
         "https": "1.0.0",
         "strong-soap": "4.1.14",
         "xml2js": "0.6.2",
+        "xmlbuilder2": "3.1.1",
         "xtutils": "1.0.7"
     }
 }
