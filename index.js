@@ -1,19 +1,28 @@
 // >_  node index.js || npm run dev
+// cspell: ignore jcgd
 const fs = require('fs');
 const Path = require('path');
 const https = require('https');
 const { parseStringPromise } = require('xml2js');
 const { _uuid, Term, _jsonStringify, _sort } = require('xtutils');
 
+// Creds
+const CREDS_FILE =
+// Path.join(__dirname, 'creds.example.json');
+// Path.join(__dirname, 'creds.rms.xx.json');
+Path.join(__dirname, 'creds.jcgd-dev.xx.json');
+
+// Dump Dir
+const DUMP_DIR =
+// Path.join(__dirname, '.dump.xx');
+// Path.join(__dirname, '.rms.xx');
+Path.join(__dirname, '.jcgd-dev.xx');
+
 // Files
-const DUMP_DIR = Path.join(__dirname, '.dump.xx');
-const CREDS_FILE = Path.join(__dirname, 'creds.json');
 const SESSION_FILE = Path.join(DUMP_DIR, 'session.json');
 const METADATA_FILE = Path.join(DUMP_DIR, 'metadata.json');
 const RECORDS_FILE = Path.join(DUMP_DIR, 'records.json');
 const DEPENDENCIES_FILE = Path.join(DUMP_DIR, 'dependencies.json');
-const COMPONENTS_FILE = Path.join(DUMP_DIR, 'dependencies-components.json');
-const DEPLOYMENTS_FILE = Path.join(DUMP_DIR, 'dependencies-deployments.json');
 const PACKAGE_FILE = Path.join(DUMP_DIR, 'package.xml');
 
 // Cache
